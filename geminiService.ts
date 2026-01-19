@@ -2,6 +2,8 @@
 import { GoogleGenAI, Type } from "@google/genai";
 import { Puzzle, Interaction, Difficulty } from "./types";
 
+type QuestionStatus = 'Yes' | 'No' | 'Irrelevant';
+
 const CLASSIC_LOGIC_SEEDS = `
 1. Height/Reach (Elevator button -> high shelf/pulley).
 2. Animals (Dog missing -> FBI doesn't care; Sam the cat killing birds).
@@ -34,9 +36,9 @@ ${CLASSIC_LOGIC_SEEDS}
 
 [Language]: All output must be in English.`;
 
-// Fix: Initializing GoogleGenAI inside each function call to ensure use of the current process.env.API_KEY.
+// Fix: Initializing GoogleGenAI inside each function call to ensure use of the current process.env.GEMINI_API_KEY.
 export const generateNewPuzzle = async (difficulty: Difficulty, playedTitles: string[] = []): Promise<Puzzle> => {
-  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+  const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
   const response = await ai.models.generateContent({
     model: 'gemini-3-flash-preview',
     contents: `Generate a ${difficulty} difficulty medieval lateral thinking puzzle. 
@@ -64,7 +66,7 @@ export const generateNewPuzzle = async (difficulty: Difficulty, playedTitles: st
 };
 
 export const generateHint = async (puzzle: Puzzle, history: Interaction[], hintIndex: number): Promise<string> => {
-  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+  const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
   const previousHints = history
     .filter(h => h.type === 'hint')
     .map(h => h.response)
@@ -92,12 +94,12 @@ export const generateHint = async (puzzle: Puzzle, history: Interaction[], hintI
 };
 
 export const evaluateInteraction = async (
-  puzzle: Puzzle, 
-  history: Interaction[], 
-  userInput: string, 
+  puzzle: Puzzle,
+  history: Interaction[],
+  userInput: string,
   isGuess: boolean
 ): Promise<Interaction> => {
-  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+  const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
   if (isGuess) {
     const response = await ai.models.generateContent({
       model: 'gemini-3-flash-preview',
@@ -144,11 +146,12 @@ export const evaluateInteraction = async (
       }
     });
 
+    const result = JSON.parse(response.text.trim());
     return {
       type: 'question',
       content: userInput,
-      response: "", 
-      status: JSON.parse(response.text.trim()).status as any
+      response: "",
+      status: result.status as QuestionStatus
     };
   }
 };

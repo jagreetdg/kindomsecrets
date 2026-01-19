@@ -13,9 +13,18 @@ const App: React.FC = () => {
   const [hintsRemaining, setHintsRemaining] = useState(0);
   const [hintIndex, setHintIndex] = useState(0);
   const [historyLog, setHistoryLog] = useState<HistoryEntry[]>([]);
+  const [error, setError] = useState<string | null>(null);
   
   const historyEndRef = useRef<HTMLDivElement>(null);
   const progressInterval = useRef<number | null>(null);
+  const audioContext = useRef<AudioContext | null>(null);
+
+  const getAudioContext = () => {
+    if (!audioContext.current) {
+      audioContext.current = new (window.AudioContext || (window as any).webkitAudioContext)();
+    }
+    return audioContext.current;
+  };
 
   useEffect(() => {
     const saved = localStorage.getItem('kingdom_secrets_history');
@@ -47,6 +56,15 @@ const App: React.FC = () => {
     };
   }, [isLoading]);
 
+  // Cleanup AudioContext on unmount
+  useEffect(() => {
+    return () => {
+      if (audioContext.current && audioContext.current.state !== 'closed') {
+        audioContext.current.close();
+      }
+    };
+  }, []);
+
   const saveToHistory = (status: 'Solved' | 'Surrendered') => {
     if (!currentPuzzle) return;
     const entry: HistoryEntry = {
@@ -64,7 +82,7 @@ const App: React.FC = () => {
 
   const playSfx = (type: 'yes' | 'no' | 'correct' | 'click' | 'wood' | 'tick' | 'hint' | 'solve_fail') => {
     try {
-      const ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
+      const ctx = getAudioContext();
       const gain = ctx.createGain();
       gain.connect(ctx.destination);
       const now = ctx.currentTime;
@@ -188,6 +206,7 @@ const App: React.FC = () => {
   const startGame = async (difficulty: Difficulty) => {
     playSfx('click');
     setIsLoading(true);
+    setError(null);
     setGameState(GameState.LOADING);
     setHistory([]);
     setHintIndex(0);
@@ -199,6 +218,8 @@ const App: React.FC = () => {
       setGameState(GameState.PLAYING);
       playSfx('wood');
     } catch (error) {
+      console.error('Failed to generate puzzle:', error);
+      setError('Failed to generate puzzle. Please try again.');
       setGameState(GameState.MENU);
     } finally {
       setIsLoading(false);
@@ -211,10 +232,11 @@ const App: React.FC = () => {
     const currentInput = input;
     setInput('');
     setIsLoading(true);
+    setError(null);
     try {
       const result = await evaluateInteraction(currentPuzzle, history, currentInput, isGuess);
       setHistory(prev => [...prev, result]);
-      
+
       if (isGuess) {
         if (result.status === 'Correct') {
           playSfx('correct');
@@ -232,7 +254,10 @@ const App: React.FC = () => {
         else playSfx('tick');
       }
     } catch (error) {
-      console.error(error);
+      console.error('Failed to process interaction:', error);
+      setError('Failed to process your input. Please try again.');
+      // Restore the input so user doesn't lose their text
+      setInput(currentInput);
     } finally {
       setIsLoading(false);
     }
@@ -242,6 +267,7 @@ const App: React.FC = () => {
     if (!currentPuzzle || isLoading || hintsRemaining <= 0) return;
     playSfx('hint');
     setIsLoading(true);
+    setError(null);
     try {
       const newHintIndex = hintIndex + 1;
       const hintText = await generateHint(currentPuzzle, history, newHintIndex);
@@ -254,7 +280,8 @@ const App: React.FC = () => {
       setHintsRemaining(prev => prev - 1);
       setHintIndex(newHintIndex);
     } catch (error) {
-      console.error(error);
+      console.error('Failed to generate hint:', error);
+      setError('Failed to generate hint. Please try again.');
     } finally {
       setIsLoading(false);
     }
@@ -293,20 +320,45 @@ const App: React.FC = () => {
           </h1>
           <div className="menu-panel p-10 max-w-lg w-full text-center">
             <div className="space-y-6">
-              <button onClick={() => startGame('Easy')} className="w-full medieval-button py-5 text-lg font-bold uppercase tracking-widest">Peasant (Easy)</button>
-              <button onClick={() => startGame('Medium')} className="w-full medieval-button py-5 text-lg font-bold uppercase tracking-widest">Knight (Medium)</button>
-              <button onClick={() => startGame('Hard')} className="w-full medieval-button py-5 text-lg font-bold uppercase tracking-widest">Lord (Hard)</button>
+              <button
+                onClick={() => startGame('Easy')}
+                className="w-full medieval-button py-5 text-lg font-bold uppercase tracking-widest"
+                aria-label="Start easy difficulty game as Peasant"
+                disabled={isLoading}
+              >
+                Peasant (Easy)
+              </button>
+              <button
+                onClick={() => startGame('Medium')}
+                className="w-full medieval-button py-5 text-lg font-bold uppercase tracking-widest"
+                aria-label="Start medium difficulty game as Knight"
+                disabled={isLoading}
+              >
+                Knight (Medium)
+              </button>
+              <button
+                onClick={() => startGame('Hard')}
+                className="w-full medieval-button py-5 text-lg font-bold uppercase tracking-widest"
+                aria-label="Start hard difficulty game as Lord"
+                disabled={isLoading}
+              >
+                Lord (Hard)
+              </button>
               
               <div className="pt-4 mt-2 border-t border-[#4a4138] flex gap-4">
-                <button 
-                  onClick={() => navigateTo(GameState.RULES)} 
+                <button
+                  onClick={() => navigateTo(GameState.RULES)}
                   className="flex-1 medieval-button py-1.5 text-[10px] tracking-widest"
+                  aria-label="View game rules and laws"
+                  disabled={isLoading}
                 >
                   Laws
                 </button>
-                <button 
-                  onClick={() => navigateTo(GameState.HISTORY)} 
+                <button
+                  onClick={() => navigateTo(GameState.HISTORY)}
                   className="flex-1 medieval-button py-1.5 text-[10px] tracking-widest"
+                  aria-label="View game history and archives"
+                  disabled={isLoading}
                 >
                   Archives
                 </button>
@@ -347,7 +399,7 @@ const App: React.FC = () => {
                     <h4 className="text-2xl font-bold text-[#433422] mb-1">{entry.puzzle.title}</h4>
                     <p className="text-lg italic text-gray-700 mb-2 line-clamp-1">"{entry.puzzle.surface}"</p>
                     <details className="mt-2 text-[14px] cursor-pointer" onToggle={() => playSfx('click')}>
-                      <summary className="text-[#7b0000] font-bold uppercase hover:underline">View Truth</summary>
+                      <summary className="text-[#7b0000] font-bold uppercase hover:underline" role="button" tabIndex={0}>View Truth</summary>
                       <p className="mt-2 p-3 bg-[#fdf8e8] border-l-4 border-[#7b0000] text-lg pixel-reading text-[#433422] leading-relaxed">
                         {entry.puzzle.bottom}
                       </p>
@@ -398,6 +450,20 @@ const App: React.FC = () => {
 
       {gameState === GameState.PLAYING && (
         <div key="playing" className="flex flex-col h-[100dvh] lg:h-screen relative z-10 p-2 md:p-6 max-w-7xl mx-auto w-full animate-page-entry overflow-hidden">
+          {/* Error Display */}
+          {error && (
+            <div className="mb-2 md:mb-4 p-2 md:p-3 bg-red-900/80 border border-red-600 text-red-200 text-center text-sm md:text-base rounded">
+              {error}
+              <button
+                onClick={() => setError(null)}
+                className="ml-2 text-red-400 hover:text-red-300"
+                aria-label="Dismiss error"
+              >
+                ✕
+              </button>
+            </div>
+          )}
+
           {/* Header */}
           <div className="flex justify-between items-center mb-2 md:mb-4 stone-border p-2 md:p-3 shrink-0">
             <div className="flex items-center gap-2 md:gap-4 overflow-hidden">
@@ -409,10 +475,31 @@ const App: React.FC = () => {
             </div>
             <div className="flex gap-1 md:gap-4">
               {hintsRemaining > 0 && (
-                <button onClick={handleHint} disabled={isLoading} className="medieval-button px-2 md:px-4 py-1 md:py-2 text-[6px] md:text-[8px]">Hint ({hintsRemaining})</button>
+                <button
+                  onClick={handleHint}
+                  disabled={isLoading}
+                  className="medieval-button px-2 md:px-4 py-1 md:py-2 text-[6px] md:text-[8px]"
+                  aria-label={`Get hint ${hintsRemaining} remaining`}
+                >
+                  Hint ({hintsRemaining})
+                </button>
               )}
-              <button onClick={handleSurrender} disabled={isLoading} className="medieval-button danger-button px-2 md:px-4 py-1 md:py-2 text-[6px] md:text-[8px]">Surrender</button>
-              <button onClick={() => navigateTo(GameState.MENU)} className="medieval-button px-2 md:px-4 py-1 md:py-2 text-[6px] md:text-[8px] bg-[#111]">Exit</button>
+              <button
+                onClick={handleSurrender}
+                disabled={isLoading}
+                className="medieval-button danger-button px-2 md:px-4 py-1 md:py-2 text-[6px] md:text-[8px]"
+                aria-label="Surrender current case"
+              >
+                Surrender
+              </button>
+              <button
+                onClick={() => navigateTo(GameState.MENU)}
+                className="medieval-button px-2 md:px-4 py-1 md:py-2 text-[6px] md:text-[8px] bg-[#111]"
+                aria-label="Exit to main menu"
+                disabled={isLoading}
+              >
+                Exit
+              </button>
             </div>
           </div>
 
@@ -469,10 +556,31 @@ const App: React.FC = () => {
                   disabled={isLoading}
                   placeholder="Inquire..."
                   className="w-full h-full bg-[#0a0a0a] text-gray-100 p-3 md:p-4 mb-3 md:mb-4 text-lg md:text-2xl border-4 border-gray-800 focus:border-[#c5a059] outline-none resize-none pixel-reading font-bold shadow-inner"
+                  aria-label="Enter your question or answer"
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && !e.shiftKey && input.trim()) {
+                      e.preventDefault();
+                      handleAction(false);
+                    }
+                  }}
                 />
                 <div className="grid grid-cols-2 gap-2 md:gap-4 shrink-0">
-                  <button onClick={() => handleAction(false)} disabled={isLoading || !input.trim()} className="medieval-button py-3 md:py-6 text-[10px] md:text-[12px] font-black tracking-widest">ASK</button>
-                  <button onClick={() => handleAction(true)} disabled={isLoading || !input.trim()} className="medieval-button py-3 md:py-6 text-[10px] md:text-[12px] font-black tracking-widest bg-[#222]">SOLVE</button>
+                  <button
+                    onClick={() => handleAction(false)}
+                    disabled={isLoading || !input.trim()}
+                    className="medieval-button py-3 md:py-6 text-[10px] md:text-[12px] font-black tracking-widest"
+                    aria-label="Ask question"
+                  >
+                    ASK
+                  </button>
+                  <button
+                    onClick={() => handleAction(true)}
+                    disabled={isLoading || !input.trim()}
+                    className="medieval-button py-3 md:py-6 text-[10px] md:text-[12px] font-black tracking-widest bg-[#222]"
+                    aria-label="Submit final answer"
+                  >
+                    SOLVE
+                  </button>
                 </div>
               </div>
             </div>
