@@ -4,6 +4,12 @@ import { Puzzle, Interaction, Difficulty } from "./types";
 
 type QuestionStatus = 'Yes' | 'No' | 'Irrelevant';
 
+// Validate API key at module level
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+if (!GEMINI_API_KEY) {
+  throw new Error('GEMINI_API_KEY environment variable is required but not set. Please create a .env.local file with your Gemini API key.');
+}
+
 const CLASSIC_LOGIC_SEEDS = `
 1. Height/Reach (Elevator button -> high shelf/pulley).
 2. Animals (Dog missing -> FBI doesn't care; Sam the cat killing birds).
@@ -35,10 +41,8 @@ ${CLASSIC_LOGIC_SEEDS}
 [Strict Rule]: Use your vast knowledge of riddles to provide unique and logical scenarios. NEVER repeat the same core logic twice in a row.
 
 [Language]: All output must be in English.`;
-
-// Fix: Initializing GoogleGenAI inside each function call to ensure use of the current process.env.GEMINI_API_KEY.
 export const generateNewPuzzle = async (difficulty: Difficulty, playedTitles: string[] = []): Promise<Puzzle> => {
-  const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+  const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
   const response = await ai.models.generateContent({
     model: 'gemini-3-flash-preview',
     contents: `Generate a ${difficulty} difficulty medieval lateral thinking puzzle. 
