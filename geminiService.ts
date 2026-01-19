@@ -249,9 +249,22 @@ export const evaluateInteraction = async (
 [PLAYER GUESS]: ${userInput}
 
 [EVALUATION RULES]:
-1. Be SMART and LENIENT. If the player captures the core "twist" or "truth" of the mystery, it is CORRECT.
-2. Synonyms or simplified explanations are fine (e.g., if truth is "he is a stone carving statue" and player says "he is a statue", that is CORRECT).
-3. If incorrect, feedback must be exactly "The truth remains shrouded in mystery."`,
+1. Be LENIENT but PRECISE. Accept answers that capture the core "twist", "logic", or "truth" of the mystery.
+2. Accept synonyms, paraphrases, and simplified versions that preserve the key mechanism.
+3. Accept answers that miss minor details but get the fundamental concept and specific element right.
+4. Examples of ACCEPTABLE matches:
+   - Truth: "He jumped from the first floor" → Guess: "He jumped from a low height" ✓
+   - Truth: "It was a dog" → Guess: "It was a dog" ✓ (or very close synonyms)
+   - Truth: "He is a stone statue" → Guess: "He is a statue" or "He is made of stone" ✓
+   - Truth: "The elevator stopped between floors" → Guess: "The elevator got stuck between floors" ✓
+   - Truth: "She was a professional actress" → Guess: "She was acting" or "She was pretending" ✓
+5. REJECT answers that are too vague, generic, or miss the specific key element that makes the puzzle's logic work.
+6. Examples of INCORRECT answers:
+   - Truth: "It was a dog" → Guess: "It was an animal" ✗ (too vague, doesn't identify the specific animal)
+   - Truth: "He is a statue" → Guess: "He can't move" ✗ (misses the material/creation aspect)
+   - Truth: "She is pregnant" → Guess: "Something happened to her" ✗ (too generic)
+7. Only mark CORRECT if the guess shows clear understanding of the puzzle's specific mechanism or twist.
+8. If incorrect, feedback must be exactly "The truth remains shrouded in mystery."`,
         config: {
           responseMimeType: "application/json",
           responseSchema: {

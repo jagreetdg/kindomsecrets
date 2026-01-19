@@ -3,6 +3,149 @@ import React, { useState, useEffect, useRef } from 'react';
 import { GameState, Puzzle, Interaction, Difficulty, HistoryEntry } from './types';
 import { generateNewPuzzle, evaluateInteraction, generateHint } from './geminiService';
 
+// Data validation functions
+const validateHistoryEntry = (entry: any): entry is HistoryEntry => {
+  return (
+    entry &&
+    typeof entry === 'object' &&
+    typeof entry.id === 'string' &&
+    typeof entry.timestamp === 'number' &&
+    entry.timestamp > 0 &&
+    entry.puzzle &&
+    typeof entry.puzzle.title === 'string' &&
+    typeof entry.puzzle.surface === 'string' &&
+    typeof entry.puzzle.bottom === 'string' &&
+    ['Easy', 'Medium', 'Hard'].includes(entry.puzzle.difficulty) &&
+    typeof entry.interactionsCount === 'number' &&
+    typeof entry.hintsUsed === 'number' &&
+    ['Solved', 'Surrendered'].includes(entry.status)
+  );
+};
+
+const validateSessionData = (data: any): boolean => {
+  return (
+    data &&
+    typeof data === 'object' &&
+    ['MENU', 'RULES', 'LOADING', 'PLAYING', 'FINISHED', 'HISTORY'].includes(data.gameState) &&
+    (!data.currentPuzzle || (
+      data.currentPuzzle.title &&
+      data.currentPuzzle.surface &&
+      data.currentPuzzle.bottom &&
+      ['Easy', 'Medium', 'Hard'].includes(data.currentPuzzle.difficulty)
+    )) &&
+    Array.isArray(data.history) &&
+    typeof data.input === 'string' &&
+    typeof data.hintsRemaining === 'number' &&
+    typeof data.hintIndex === 'number' &&
+    typeof data.timestamp === 'number'
+  );
+};
+
+const safeParseHistoryData = (jsonString: string): HistoryEntry[] => {
+  try {
+    const parsed = JSON.parse(jsonString);
+    if (!Array.isArray(parsed)) {
+      throw new Error('History data is not an array');
+    }
+
+    // Filter out invalid entries and keep only valid ones
+    const validEntries = parsed.filter(validateHistoryEntry);
+
+    // If we lost some entries, log a warning
+    if (validEntries.length < parsed.length) {
+      console.warn(`Filtered out ${parsed.length - validEntries.length} invalid history entries`);
+    }
+
+    return validEntries;
+  } catch (error) {
+    console.error('Failed to parse history data:', error);
+    return [];
+  }
+};
+
+const safeParseSessionData = (jsonString: string): any => {
+  try {
+    const parsed = JSON.parse(jsonString);
+    if (validateSessionData(parsed)) {
+      return parsed;
+    } else {
+      throw new Error('Session data validation failed');
+    }
+  } catch (error) {
+    console.error('Failed to parse session data:', error);
+    return null;
+  }
+};
+
+// Safe localStorage operations with quota checking
+const safeLocalStorageSet = (key: string, value: string): boolean => {
+  try {
+    localStorage.setItem(key, value);
+    return true;
+  } catch (error) {
+    // Check if it's a quota exceeded error
+    if (error instanceof DOMException && (
+      error.code === 22 || // QUOTA_EXCEEDED_ERR
+      error.code === 1014 || // NS_ERROR_DOM_QUOTA_REACHED
+      error.name === 'QuotaExceededError' ||
+      error.name === 'NS_ERROR_DOM_QUOTA_REACHED'
+    )) {
+      console.warn('localStorage quota exceeded, clearing old data and retrying');
+
+      // Try to clear some space by removing old history entries
+      try {
+        const history = localStorage.getItem('kingdom_secrets_history');
+        if (history) {
+          const parsed = JSON.parse(history);
+          if (Array.isArray(parsed) && parsed.length > 10) {
+            // Keep only the most recent 10 entries
+            const trimmed = parsed.slice(0, 10);
+            localStorage.setItem('kingdom_secrets_history', JSON.stringify(trimmed));
+          }
+        }
+
+        // Try again
+        localStorage.setItem(key, value);
+        return true;
+      } catch (retryError) {
+        console.error('Failed to save to localStorage even after cleanup:', retryError);
+        return false;
+      }
+    }
+
+    console.error('Failed to save to localStorage:', error);
+    return false;
+  }
+};
+
+// Input sanitizer to prevent XSS attacks and handle problematic characters
+const sanitizeInput = (input: string): string => {
+  // Remove script tags and their contents
+  let sanitized = input.replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '');
+
+  // Remove other potentially dangerous tags
+  sanitized = sanitized.replace(/<(?:script|iframe|object|embed|form|input|button|link|meta)\b[^>]*>/gi, '');
+
+  // Escape angle brackets that might be part of incomplete tags
+  sanitized = sanitized.replace(/<[^>]*$/, ''); // Remove incomplete opening tags at end
+  sanitized = sanitized.replace(/^[^<]*>/, ''); // Remove incomplete closing tags at start
+
+  // Remove javascript: and data: URLs
+  sanitized = sanitized.replace(/(javascript|data):/gi, '');
+
+  // Remove control characters that can break JSON parsing (except tab, newline, carriage return)
+  sanitized = sanitized.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F]/g, '');
+
+  // Handle problematic Unicode characters that might cause JSON issues
+  // Remove zero-width characters and other invisible Unicode that can cause problems
+  sanitized = sanitized.replace(/[\u200B-\u200F\u2028-\u202F\u205F-\u206F]/g, '');
+
+  // Remove surrogate halves that can break JSON
+  sanitized = sanitized.replace(/[\uD800-\uDFFF]/g, '');
+
+  return sanitized;
+};
+
 const App: React.FC = () => {
   const [gameState, setGameState] = useState<GameState>(GameState.MENU);
   const [currentPuzzle, setCurrentPuzzle] = useState<Puzzle | null>(null);
@@ -14,30 +157,45 @@ const App: React.FC = () => {
   const [hintIndex, setHintIndex] = useState(0);
   const [historyLog, setHistoryLog] = useState<HistoryEntry[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [lastAction, setLastAction] = useState<{type: 'question' | 'guess' | 'hint' | 'start', input?: string} | null>(null);
   
   const historyEndRef = useRef<HTMLDivElement>(null);
   const progressInterval = useRef<number | null>(null);
   const audioContext = useRef<AudioContext | null>(null);
+  const isProcessingRef = useRef(false); // Additional guard against race conditions
+  const audioInitAttempts = useRef(0); // Track failed audio initialization attempts
+  const audioDisabled = useRef(false); // Flag to prevent repeated failed attempts
 
   const getAudioContext = () => {
+    // If audio is disabled or we've failed too many times, don't try again
+    if (audioDisabled.current || audioInitAttempts.current >= 3) {
+      return null;
+    }
+
     if (!audioContext.current) {
       try {
         // Check for AudioContext support
         const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
         if (!AudioContextClass) {
           console.warn('AudioContext not supported in this browser');
+          audioDisabled.current = true;
           return null;
         }
+
         audioContext.current = new AudioContextClass();
+        audioInitAttempts.current++;
 
         // Resume context if suspended (required by some browsers)
         if (audioContext.current.state === 'suspended') {
           audioContext.current.resume().catch((err: unknown) => {
             console.warn('Failed to resume AudioContext:', err);
+            // If resume fails, disable audio for this session
+            audioDisabled.current = true;
           });
         }
       } catch (error) {
         console.warn('Failed to create AudioContext:', error);
+        audioDisabled.current = true;
         return null;
       }
     }
@@ -47,21 +205,23 @@ const App: React.FC = () => {
   useEffect(() => {
     const saved = localStorage.getItem('kingdom_secrets_history');
     if (saved) {
-      try {
-        setHistoryLog(JSON.parse(saved));
-      } catch (e) {
-        console.error("Failed to load history", e);
-      }
+      const validatedHistory = safeParseHistoryData(saved);
+      setHistoryLog(validatedHistory);
     }
+
+    // Try to restore game session
+    loadGameSession();
   }, []);
 
   useEffect(() => {
+    // Always clear any existing interval first to prevent race conditions
+    if (progressInterval.current) {
+      clearInterval(progressInterval.current);
+      progressInterval.current = null;
+    }
+
     if (isLoading) {
       setLoadingProgress(0);
-      // Clear any existing interval first
-      if (progressInterval.current) {
-        clearInterval(progressInterval.current);
-      }
       progressInterval.current = window.setInterval(() => {
         setLoadingProgress((prev: number) => {
           if (prev >= 100) return 100; // Prevent going over 100
@@ -72,12 +232,10 @@ const App: React.FC = () => {
         });
       }, 150);
     } else {
-      if (progressInterval.current) {
-        clearInterval(progressInterval.current);
-        progressInterval.current = null;
-      }
       setLoadingProgress(100);
     }
+
+    // Cleanup function ensures interval is cleared when effect re-runs or component unmounts
     return () => {
       if (progressInterval.current) {
         clearInterval(progressInterval.current);
@@ -86,14 +244,25 @@ const App: React.FC = () => {
     };
   }, [isLoading]);
 
-  // Cleanup AudioContext on unmount
+  // Cleanup AudioContext and intervals on unmount
   useEffect(() => {
     return () => {
+      // Clear any remaining intervals
+      if (progressInterval.current) {
+        clearInterval(progressInterval.current);
+        progressInterval.current = null;
+      }
+
+      // Close AudioContext
       if (audioContext.current && audioContext.current.state !== 'closed') {
         audioContext.current.close().catch((err: unknown) => {
           console.warn('Failed to close AudioContext:', err);
         });
       }
+
+      // Reset audio state for potential re-initialization
+      audioInitAttempts.current = 0;
+      audioDisabled.current = false;
     };
   }, []);
 
@@ -107,9 +276,60 @@ const App: React.FC = () => {
       hintsUsed: history.filter((i: Interaction) => i.type === 'hint').length,
       status
     };
-    const newLog = [entry, ...historyLog].slice(0, 50); 
+    const newLog = [entry, ...historyLog].slice(0, 50);
     setHistoryLog(newLog);
-    localStorage.setItem('kingdom_secrets_history', JSON.stringify(newLog));
+    safeLocalStorageSet('kingdom_secrets_history', JSON.stringify(newLog));
+    // Clear session data when game ends
+    localStorage.removeItem('kingdom_secrets_session');
+  };
+
+  const saveGameSession = () => {
+    if (gameState === GameState.PLAYING && currentPuzzle) {
+      const sessionData = {
+        gameState,
+        currentPuzzle,
+        history,
+        input,
+        hintsRemaining,
+        hintIndex,
+        timestamp: Date.now()
+      };
+      const success = safeLocalStorageSet('kingdom_secrets_session', JSON.stringify(sessionData));
+      if (!success) {
+        console.warn('Failed to save game session due to storage limitations');
+      }
+    }
+  };
+
+  const loadGameSession = () => {
+    try {
+      const saved = localStorage.getItem('kingdom_secrets_session');
+      if (saved) {
+        const sessionData = safeParseSessionData(saved);
+        if (sessionData) {
+          // Only restore if it's recent (within last hour)
+          if (sessionData.timestamp && Date.now() - sessionData.timestamp < 3600000) {
+            setGameState(sessionData.gameState || GameState.MENU);
+            setCurrentPuzzle(sessionData.currentPuzzle || null);
+            setHistory(sessionData.history || []);
+            setInput(sessionData.input || '');
+            setHintsRemaining(sessionData.hintsRemaining || 0);
+            setHintIndex(sessionData.hintIndex || 0);
+            return true;
+          } else {
+            // Clear expired session
+            localStorage.removeItem('kingdom_secrets_session');
+          }
+        } else {
+          // Clear corrupted session data
+          localStorage.removeItem('kingdom_secrets_session');
+        }
+      }
+    } catch (error) {
+      console.warn('Failed to load game session:', error);
+      localStorage.removeItem('kingdom_secrets_session');
+    }
+    return false;
   };
 
   const playSfx = (type: 'yes' | 'no' | 'correct' | 'click' | 'wood' | 'tick' | 'hint' | 'solve_fail') => {
@@ -239,8 +459,18 @@ const App: React.FC = () => {
     }
   }, [history, gameState]);
 
+  // Save game session whenever relevant state changes
+  useEffect(() => {
+    if (gameState === GameState.PLAYING) {
+      saveGameSession();
+    }
+  }, [gameState, currentPuzzle, history, input, hintsRemaining, hintIndex]);
+
   const startGame = async (difficulty: Difficulty) => {
     playSfx('click');
+    if (isLoading || isProcessingRef.current) return;
+    isProcessingRef.current = true;
+    setLastAction({ type: 'start' });
     setIsLoading(true);
     setError(null);
     setGameState(GameState.LOADING);
@@ -248,8 +478,14 @@ const App: React.FC = () => {
     setHintIndex(0);
     setHintsRemaining({ 'Easy': 3, 'Medium': 5, 'Hard': 7 }[difficulty]);
     try {
-      const playedTitles = historyLog.map(entry => entry.puzzle.title);
-      const puzzle = await generateNewPuzzle(difficulty, playedTitles);
+      // Create a comprehensive exclusion list to prevent similar puzzles
+      const exclusionData = historyLog.map(entry => ({
+        title: entry.puzzle.title,
+        surface: entry.puzzle.surface.substring(0, 100), // First 100 chars of surface text
+        bottom: entry.puzzle.bottom.substring(0, 100)   // First 100 chars of solution
+      }));
+      const exclusionStrings = exclusionData.flatMap(data => [data.title, data.surface, data.bottom]);
+      const puzzle = await generateNewPuzzle(difficulty, exclusionStrings);
       setCurrentPuzzle(puzzle);
       setGameState(GameState.PLAYING);
       playSfx('wood');
@@ -259,14 +495,17 @@ const App: React.FC = () => {
       setGameState(GameState.MENU);
     } finally {
       setIsLoading(false);
+      isProcessingRef.current = false;
     }
   };
 
-  const handleAction = async (isGuess: boolean) => {
+  const handleAction = async (isGuess: boolean, retryInput?: string) => {
     playSfx('click');
-    if (!input.trim() || !currentPuzzle || isLoading) return;
-    const currentInput = input;
-    setInput('');
+    const inputToUse = retryInput || input;
+    if (!inputToUse.trim() || !currentPuzzle || isLoading || isProcessingRef.current) return;
+    isProcessingRef.current = true;
+    const currentInput = inputToUse;
+    if (!retryInput) setInput('');
     setIsLoading(true);
     setError(null);
     try {
@@ -296,30 +535,44 @@ const App: React.FC = () => {
       setInput(currentInput);
     } finally {
       setIsLoading(false);
+      isProcessingRef.current = false;
     }
   };
 
   const handleHint = async () => {
-    if (!currentPuzzle || isLoading || hintsRemaining <= 0) return;
+    if (!currentPuzzle || isLoading || hintsRemaining <= 0 || isProcessingRef.current) return;
+    isProcessingRef.current = true;
+    setLastAction({ type: 'hint' });
     playSfx('hint');
     setIsLoading(true);
     setError(null);
+
+    // Always increment hint index when user requests a hint (for consistent numbering)
+    const currentHintIndex = hintIndex + 1;
+    setHintIndex(currentHintIndex);
+    setHintsRemaining((prev: number) => prev - 1); // Consume hint attempt immediately
+
     try {
-      const newHintIndex = hintIndex + 1;
-      const hintText = await generateHint(currentPuzzle, history, newHintIndex);
+      const hintText = await generateHint(currentPuzzle, history, currentHintIndex);
       setHistory((prev: Interaction[]) => [...prev, {
         type: 'hint',
-        content: `Seek Clue (#${newHintIndex})`,
+        content: `Seek Clue (#${currentHintIndex})`,
         response: hintText,
         status: 'Clue'
       }]);
-      setHintsRemaining((prev: number) => prev - 1);
-      setHintIndex(newHintIndex);
     } catch (error) {
       console.error('Failed to generate hint:', error);
       setError('Failed to generate hint. Please try again.');
+      // Hint was already consumed, but we can show it as failed in history
+      setHistory((prev: Interaction[]) => [...prev, {
+        type: 'hint',
+        content: `Seek Clue (#${currentHintIndex}) - Failed`,
+        response: 'Hint generation failed. Please try again.',
+        status: 'Clue'
+      }]);
     } finally {
       setIsLoading(false);
+      isProcessingRef.current = false;
     }
   };
 
@@ -328,6 +581,41 @@ const App: React.FC = () => {
     saveToHistory('Surrendered');
     setGameState(GameState.FINISHED);
     playSfx('wood');
+  };
+
+  const retryLastAction = async () => {
+    if (!lastAction) return;
+
+    setError(null);
+    setIsLoading(true);
+
+    try {
+      switch (lastAction.type) {
+        case 'question':
+          if (lastAction.input) {
+            await handleAction(false, lastAction.input);
+          }
+          break;
+        case 'guess':
+          if (lastAction.input) {
+            await handleAction(true, lastAction.input);
+          }
+          break;
+        case 'hint':
+          await handleHint();
+          break;
+        case 'start':
+          if (currentPuzzle?.difficulty) {
+            await startGame(currentPuzzle.difficulty);
+          }
+          break;
+      }
+    } catch (error) {
+      console.error('Retry failed:', error);
+      setError('Retry failed. Please try again or refresh the page.');
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   const navigateTo = (state: GameState) => {
@@ -490,13 +778,25 @@ const App: React.FC = () => {
           {error && (
             <div className="mb-2 md:mb-4 p-2 md:p-3 bg-red-900/80 border border-red-600 text-red-200 text-center text-sm md:text-base rounded">
               {error}
-              <button
-                onClick={() => setError(null)}
-                className="ml-2 text-red-400 hover:text-red-300"
-                aria-label="Dismiss error"
-              >
-                ✕
-              </button>
+              <div className="mt-2 flex justify-center gap-2">
+                {lastAction && (
+                  <button
+                    onClick={retryLastAction}
+                    disabled={isLoading}
+                    className="px-3 py-1 bg-red-800 hover:bg-red-700 text-red-200 text-xs rounded disabled:opacity-50"
+                    aria-label="Retry last action"
+                  >
+                    Retry
+                  </button>
+                )}
+                <button
+                  onClick={() => setError(null)}
+                  className="px-3 py-1 bg-red-800 hover:bg-red-700 text-red-200 text-xs rounded"
+                  aria-label="Dismiss error"
+                >
+                  ✕
+                </button>
+              </div>
             </div>
           )}
 
@@ -522,7 +822,7 @@ const App: React.FC = () => {
               )}
               <button
                 onClick={handleSurrender}
-                disabled={isLoading}
+                disabled={isLoading || !currentPuzzle}
                 className="medieval-button danger-button px-2 md:px-4 py-1 md:py-2 text-[6px] md:text-[8px]"
                 aria-label="Surrender current case"
               >
@@ -588,9 +888,10 @@ const App: React.FC = () => {
               <div className="stone-border p-3 md:p-6 flex flex-col min-h-0 bg-black/40 h-[28vh] lg:h-auto lg:flex-1">
                 <textarea
                   value={input}
-                  onChange={(e) => setInput(e.target.value)}
+                  onChange={(e) => setInput(sanitizeInput(e.target.value))}
                   disabled={isLoading}
                   placeholder="Inquire..."
+                  maxLength={1500}
                   className="w-full h-full bg-[#0a0a0a] text-gray-100 p-3 md:p-4 mb-3 md:mb-4 text-lg md:text-2xl border-4 border-gray-800 focus:border-[#c5a059] outline-none resize-none pixel-reading font-bold shadow-inner"
                   aria-label="Enter your question or answer"
                   onKeyDown={(e) => {
@@ -600,9 +901,15 @@ const App: React.FC = () => {
                     }
                   }}
                 />
+                <div className="text-xs text-gray-400 text-right mb-2 font-bold">
+                  {input.length}/1500
+                </div>
                 <div className="grid grid-cols-2 gap-2 md:gap-4 shrink-0">
                   <button
-                    onClick={() => handleAction(false)}
+                    onClick={() => {
+                      setLastAction({ type: 'question', input });
+                      handleAction(false);
+                    }}
                     disabled={isLoading || !input.trim()}
                     className="medieval-button py-3 md:py-6 text-[10px] md:text-[12px] font-black tracking-widest"
                     aria-label="Ask question"
@@ -610,7 +917,10 @@ const App: React.FC = () => {
                     ASK
                   </button>
                   <button
-                    onClick={() => handleAction(true)}
+                    onClick={() => {
+                      setLastAction({ type: 'guess', input });
+                      handleAction(true);
+                    }}
                     disabled={isLoading || !input.trim()}
                     className="medieval-button py-3 md:py-6 text-[10px] md:text-[12px] font-black tracking-widest bg-[#222]"
                     aria-label="Submit final answer"
