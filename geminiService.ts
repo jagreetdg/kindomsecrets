@@ -4,17 +4,54 @@ import { Puzzle, Interaction, Difficulty } from "./types";
 
 type QuestionStatus = 'Yes' | 'No' | 'Irrelevant';
 
-const getModelForDifficulty = (difficulty: Difficulty): string => {
-  switch (difficulty) {
-    case 'Easy':
-      return 'gemini-1.5-flash';
-    case 'Medium':
-      return 'gemini-3-flash';
-    case 'Hard':
-      return 'gemini-3-pro';
-    default:
-      return 'gemini-1.5-flash'; // fallback
+// Safe JSON parsing with error recovery
+const safeJsonParse = (text: string): any => {
+  try {
+    return JSON.parse(text);
+  } catch (error) {
+    console.error('Initial JSON parse failed:', error);
+    console.error('Raw response text:', text);
+
+    // Try to clean up common JSON issues
+    let cleanedText = text.trim();
+
+    // Remove any leading/trailing non-JSON content
+    const jsonStart = cleanedText.indexOf('{');
+    const jsonEnd = cleanedText.lastIndexOf('}');
+
+    if (jsonStart !== -1 && jsonEnd !== -1 && jsonEnd > jsonStart) {
+      cleanedText = cleanedText.substring(jsonStart, jsonEnd + 1);
+    }
+
+    // Fix common issues
+    cleanedText = cleanedText
+      .replace(/,\s*}/g, '}') // Remove trailing commas
+      .replace(/,\s*]/g, ']') // Remove trailing commas in arrays
+      .replace(/([{,]\s*)([a-zA-Z_][a-zA-Z0-9_]*)\s*:/g, '$1"$2":') // Quote unquoted keys
+      .replace(/:\s*([^",\[\]{}\n]+)([,}])/g, ': "$1"$2'); // Quote unquoted string values
+
+    try {
+      return JSON.parse(cleanedText);
+    } catch (secondError) {
+      console.error('Cleaned JSON parse also failed:', secondError);
+      console.error('Cleaned text:', cleanedText);
+      throw new Error(`JSON parsing failed after cleanup: ${secondError instanceof Error ? secondError.message : String(secondError)}`);
+    }
   }
+};
+
+// Model selection with fallback logic
+const getModelForDifficulty = (difficulty: Difficulty, attemptCount: number = 0): string => {
+  const models = {
+    Easy: ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-pro'], // Start with fast/simple model
+    Medium: ['gemini-1.5-pro', 'gemini-pro', 'gemini-1.5-flash'], // Start with more capable model
+    Hard: ['gemini-pro', 'gemini-1.5-pro', 'gemini-1.5-flash'] // Start with most capable model
+  };
+
+  const difficultyModels = models[difficulty] || models.Easy;
+  const modelIndex = Math.max(0, Math.min(attemptCount, difficultyModels.length - 1));
+
+  return difficultyModels[modelIndex]!;
 };
 
 // Validate API key at module level
@@ -54,14 +91,19 @@ ${CLASSIC_LOGIC_SEEDS}
 [Strict Rule]: Use your vast knowledge of riddles to provide unique and logical scenarios. NEVER repeat the same core logic twice in a row.
 
 [Language]: All output must be in English.`;
-export const generateNewPuzzle = async (difficulty: Difficulty, playedTitles: string[] = []): Promise<Puzzle> => {
+export const generateNewPuzzle = async (difficulty: Difficulty, playedTitles: string[] = [], attemptCount: number = 0): Promise<Puzzle> => {
+  const maxRetries = 3;
+
   try {
     const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
+    const model = getModelForDifficulty(difficulty, attemptCount);
+
     const response = await ai.models.generateContent({
-      model: getModelForDifficulty(difficulty),
+      model,
       contents: `Generate a ${difficulty} difficulty medieval lateral thinking puzzle.
       ${difficulty === 'Easy' ? 'Use very simple, classic logic like "it was a dog" or "he jumped from a low height".' : ''}
-      Avoid these themes: ${playedTitles.join(', ')}.`,
+      Avoid puzzles similar to these previously played ones: ${playedTitles.join(', ')}.
+      This includes similar scenarios, riddles, or solutions that users have already encountered.`,
       config: {
         systemInstruction: SYSTEM_PROMPT,
         responseMimeType: "application/json",
@@ -84,9 +126,8 @@ export const generateNewPuzzle = async (difficulty: Difficulty, playedTitles: st
     const rawText = response.text.trim();
     let data;
     try {
-      data = JSON.parse(rawText);
+      data = safeJsonParse(rawText);
     } catch (parseError) {
-      console.error('Failed to parse JSON response:', rawText);
       throw new Error(`Invalid JSON response from Gemini API: ${parseError instanceof Error ? parseError.message : String(parseError)}`);
     }
 
@@ -97,8 +138,16 @@ export const generateNewPuzzle = async (difficulty: Difficulty, playedTitles: st
 
     return { ...data, difficulty };
   } catch (error) {
-    console.error('Failed to generate puzzle:', error);
+    console.error(`Failed to generate puzzle (attempt ${attemptCount + 1}):`, error);
     const errorMessage = error instanceof Error ? error.message : String(error);
+
+    // If this is a model-related error and we haven't exhausted retries, try with a different model
+    if ((errorMessage.includes('model') || errorMessage.includes('MODEL')) && attemptCount < maxRetries - 1) {
+      console.log(`Retrying with alternative model (attempt ${attemptCount + 2})`);
+      return generateNewPuzzle(difficulty, playedTitles, attemptCount + 1);
+    }
+
+    // Handle other specific errors
     if (errorMessage.includes('API_KEY')) {
       throw new Error('Invalid or missing Gemini API key. Please check your .env.local file.');
     }
@@ -112,16 +161,20 @@ export const generateNewPuzzle = async (difficulty: Difficulty, playedTitles: st
   }
 };
 
-export const generateHint = async (puzzle: Puzzle, history: Interaction[], hintIndex: number): Promise<string> => {
+export const generateHint = async (puzzle: Puzzle, history: Interaction[], hintIndex: number, attemptCount: number = 0): Promise<string> => {
+  const maxRetries = 3;
+
   try {
     const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
+    const model = getModelForDifficulty(puzzle.difficulty, attemptCount);
+
     const previousHints = history
       .filter(h => h.type === 'hint')
       .map(h => h.response)
       .join(' | ');
 
     const response = await ai.models.generateContent({
-      model: getModelForDifficulty(puzzle.difficulty),
+      model,
       contents: `[TRUTH]: ${puzzle.bottom}
 [PREVIOUS HINTS]: ${previousHints || "None"}
 [REQUEST]: Cryptic hint #${hintIndex}.
@@ -145,9 +198,8 @@ export const generateHint = async (puzzle: Puzzle, history: Interaction[], hintI
     const rawText = response.text.trim();
     let data;
     try {
-      data = JSON.parse(rawText);
+      data = safeJsonParse(rawText);
     } catch (parseError) {
-      console.error('Failed to parse JSON response:', rawText);
       throw new Error(`Invalid JSON response from Gemini API: ${parseError instanceof Error ? parseError.message : String(parseError)}`);
     }
 
@@ -157,8 +209,16 @@ export const generateHint = async (puzzle: Puzzle, history: Interaction[], hintI
 
     return data.hint;
   } catch (error) {
-    console.error('Failed to generate hint:', error);
+    console.error(`Failed to generate hint (attempt ${attemptCount + 1}):`, error);
     const errorMessage = error instanceof Error ? error.message : String(error);
+
+    // If this is a model-related error and we haven't exhausted retries, try with a different model
+    if ((errorMessage.includes('model') || errorMessage.includes('MODEL')) && attemptCount < maxRetries - 1) {
+      console.log(`Retrying hint generation with alternative model (attempt ${attemptCount + 2})`);
+      return generateHint(puzzle, history, hintIndex, attemptCount + 1);
+    }
+
+    // Handle other specific errors
     if (errorMessage.includes('API_KEY')) {
       throw new Error('Invalid or missing Gemini API key. Please check your .env.local file.');
     }
@@ -173,13 +233,18 @@ export const evaluateInteraction = async (
   puzzle: Puzzle,
   _history: Interaction[],
   userInput: string,
-  isGuess: boolean
+  isGuess: boolean,
+  attemptCount: number = 0
 ): Promise<Interaction> => {
+  const maxRetries = 3;
+
   try {
     const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
+    const model = getModelForDifficulty(puzzle.difficulty, attemptCount);
+
     if (isGuess) {
       const response = await ai.models.generateContent({
-        model: getModelForDifficulty(puzzle.difficulty),
+        model,
         contents: `[TRUTH]: ${puzzle.bottom}
 [PLAYER GUESS]: ${userInput}
 
@@ -207,9 +272,8 @@ export const evaluateInteraction = async (
       const rawText = response.text.trim();
       let result;
       try {
-        result = JSON.parse(rawText);
+        result = safeJsonParse(rawText);
       } catch (parseError) {
-        console.error('Failed to parse JSON response:', rawText);
         throw new Error(`Invalid JSON response from Gemini API: ${parseError instanceof Error ? parseError.message : String(parseError)}`);
       }
 
@@ -225,7 +289,7 @@ export const evaluateInteraction = async (
       };
     } else {
       const response = await ai.models.generateContent({
-        model: getModelForDifficulty(puzzle.difficulty),
+        model,
         contents: `[TRUTH]: ${puzzle.bottom}\n[PLAYER QUESTION]: ${userInput}\nAnswer with: 'Yes', 'No', or 'Irrelevant'.`,
         config: {
           responseMimeType: "application/json",
@@ -246,9 +310,8 @@ export const evaluateInteraction = async (
       const rawText = response.text.trim();
       let result;
       try {
-        result = JSON.parse(rawText);
+        result = safeJsonParse(rawText);
       } catch (parseError) {
-        console.error('Failed to parse JSON response:', rawText);
         throw new Error(`Invalid JSON response from Gemini API: ${parseError instanceof Error ? parseError.message : String(parseError)}`);
       }
 
@@ -265,8 +328,16 @@ export const evaluateInteraction = async (
       };
     }
   } catch (error) {
-    console.error('Failed to evaluate interaction:', error);
+    console.error(`Failed to evaluate interaction (attempt ${attemptCount + 1}):`, error);
     const errorMessage = error instanceof Error ? error.message : String(error);
+
+    // If this is a model-related error and we haven't exhausted retries, try with a different model
+    if ((errorMessage.includes('model') || errorMessage.includes('MODEL')) && attemptCount < maxRetries - 1) {
+      console.log(`Retrying interaction evaluation with alternative model (attempt ${attemptCount + 2})`);
+      return evaluateInteraction(puzzle, _history, userInput, isGuess, attemptCount + 1);
+    }
+
+    // Handle other specific errors
     if (errorMessage.includes('API_KEY')) {
       throw new Error('Invalid or missing Gemini API key. Please check your .env.local file.');
     }
