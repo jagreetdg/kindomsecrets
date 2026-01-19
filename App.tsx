@@ -21,7 +21,25 @@ const App: React.FC = () => {
 
   const getAudioContext = () => {
     if (!audioContext.current) {
-      audioContext.current = new (window.AudioContext || (window as any).webkitAudioContext)();
+      try {
+        // Check for AudioContext support
+        const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+        if (!AudioContextClass) {
+          console.warn('AudioContext not supported in this browser');
+          return null;
+        }
+        audioContext.current = new AudioContextClass();
+
+        // Resume context if suspended (required by some browsers)
+        if (audioContext.current.state === 'suspended') {
+          audioContext.current.resume().catch((err: unknown) => {
+            console.warn('Failed to resume AudioContext:', err);
+          });
+        }
+      } catch (error) {
+        console.warn('Failed to create AudioContext:', error);
+        return null;
+      }
     }
     return audioContext.current;
   };
@@ -40,19 +58,31 @@ const App: React.FC = () => {
   useEffect(() => {
     if (isLoading) {
       setLoadingProgress(0);
+      // Clear any existing interval first
+      if (progressInterval.current) {
+        clearInterval(progressInterval.current);
+      }
       progressInterval.current = window.setInterval(() => {
-        setLoadingProgress(prev => {
+        setLoadingProgress((prev: number) => {
+          if (prev >= 100) return 100; // Prevent going over 100
           const next = prev < 85 ? prev + Math.random() * 8 : prev < 96 ? prev + 0.2 : prev;
-          if (Math.floor(next) > Math.floor(prev)) playSfx('tick');
-          return next;
+          const clampedNext = Math.min(100, next); // Ensure it doesn't exceed 100
+          if (Math.floor(clampedNext) > Math.floor(prev)) playSfx('tick');
+          return clampedNext;
         });
       }, 150);
     } else {
-      if (progressInterval.current) clearInterval(progressInterval.current);
+      if (progressInterval.current) {
+        clearInterval(progressInterval.current);
+        progressInterval.current = null;
+      }
       setLoadingProgress(100);
     }
     return () => {
-      if (progressInterval.current) clearInterval(progressInterval.current);
+      if (progressInterval.current) {
+        clearInterval(progressInterval.current);
+        progressInterval.current = null;
+      }
     };
   }, [isLoading]);
 
@@ -60,7 +90,9 @@ const App: React.FC = () => {
   useEffect(() => {
     return () => {
       if (audioContext.current && audioContext.current.state !== 'closed') {
-        audioContext.current.close();
+        audioContext.current.close().catch((err: unknown) => {
+          console.warn('Failed to close AudioContext:', err);
+        });
       }
     };
   }, []);
@@ -71,8 +103,8 @@ const App: React.FC = () => {
       id: Date.now().toString(),
       timestamp: Date.now(),
       puzzle: currentPuzzle,
-      interactionsCount: history.filter(i => i.type === 'question' || i.type === 'guess').length,
-      hintsUsed: history.filter(i => i.type === 'hint').length,
+      interactionsCount: history.filter((i: Interaction) => i.type === 'question' || i.type === 'guess').length,
+      hintsUsed: history.filter((i: Interaction) => i.type === 'hint').length,
       status
     };
     const newLog = [entry, ...historyLog].slice(0, 50); 
@@ -83,6 +115,10 @@ const App: React.FC = () => {
   const playSfx = (type: 'yes' | 'no' | 'correct' | 'click' | 'wood' | 'tick' | 'hint' | 'solve_fail') => {
     try {
       const ctx = getAudioContext();
+      if (!ctx) {
+        console.debug('Audio not available, skipping sound effect');
+        return;
+      }
       const gain = ctx.createGain();
       gain.connect(ctx.destination);
       const now = ctx.currentTime;
@@ -235,7 +271,7 @@ const App: React.FC = () => {
     setError(null);
     try {
       const result = await evaluateInteraction(currentPuzzle, history, currentInput, isGuess);
-      setHistory(prev => [...prev, result]);
+      setHistory((prev: Interaction[]) => [...prev, result]);
 
       if (isGuess) {
         if (result.status === 'Correct') {
@@ -271,13 +307,13 @@ const App: React.FC = () => {
     try {
       const newHintIndex = hintIndex + 1;
       const hintText = await generateHint(currentPuzzle, history, newHintIndex);
-      setHistory(prev => [...prev, {
+      setHistory((prev: Interaction[]) => [...prev, {
         type: 'hint',
         content: `Seek Clue (#${newHintIndex})`,
         response: hintText,
         status: 'Clue'
       }]);
-      setHintsRemaining(prev => prev - 1);
+      setHintsRemaining((prev: number) => prev - 1);
       setHintIndex(newHintIndex);
     } catch (error) {
       console.error('Failed to generate hint:', error);
