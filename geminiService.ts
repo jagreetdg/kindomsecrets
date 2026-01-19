@@ -4,8 +4,21 @@ import { Puzzle, Interaction, Difficulty } from "./types";
 
 type QuestionStatus = 'Yes' | 'No' | 'Irrelevant';
 
+const getModelForDifficulty = (difficulty: Difficulty): string => {
+  switch (difficulty) {
+    case 'Easy':
+      return 'gemini-1.5-flash';
+    case 'Medium':
+      return 'gemini-3-flash';
+    case 'Hard':
+      return 'gemini-3-pro';
+    default:
+      return 'gemini-1.5-flash'; // fallback
+  }
+};
+
 // Validate API key at module level
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+const GEMINI_API_KEY = process.env['GEMINI_API_KEY'];
 if (!GEMINI_API_KEY) {
   throw new Error('GEMINI_API_KEY environment variable is required but not set. Please create a .env.local file with your Gemini API key.');
 }
@@ -42,120 +55,224 @@ ${CLASSIC_LOGIC_SEEDS}
 
 [Language]: All output must be in English.`;
 export const generateNewPuzzle = async (difficulty: Difficulty, playedTitles: string[] = []): Promise<Puzzle> => {
-  const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
-  const response = await ai.models.generateContent({
-    model: 'gemini-3-flash-preview',
-    contents: `Generate a ${difficulty} difficulty medieval lateral thinking puzzle. 
-    ${difficulty === 'Easy' ? 'Use very simple, classic logic like "it was a dog" or "he jumped from a low height".' : ''}
-    Avoid these themes: ${playedTitles.join(', ')}.`,
-    config: {
-      systemInstruction: SYSTEM_PROMPT,
-      // Fix: Removed googleSearch tool because it is not recommended when using responseMimeType: "application/json"
-      // to ensure the response is strictly valid JSON for parsing.
-      responseMimeType: "application/json",
-      responseSchema: {
-        type: Type.OBJECT,
-        properties: {
-          title: { type: Type.STRING },
-          surface: { type: Type.STRING },
-          bottom: { type: Type.STRING }
-        },
-        required: ["title", "surface", "bottom"]
+  try {
+    const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
+    const response = await ai.models.generateContent({
+      model: getModelForDifficulty(difficulty),
+      contents: `Generate a ${difficulty} difficulty medieval lateral thinking puzzle.
+      ${difficulty === 'Easy' ? 'Use very simple, classic logic like "it was a dog" or "he jumped from a low height".' : ''}
+      Avoid these themes: ${playedTitles.join(', ')}.`,
+      config: {
+        systemInstruction: SYSTEM_PROMPT,
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            title: { type: Type.STRING },
+            surface: { type: Type.STRING },
+            bottom: { type: Type.STRING }
+          },
+          required: ["title", "surface", "bottom"]
+        }
       }
-    }
-  });
+    });
 
-  const data = JSON.parse(response.text.trim());
-  return { ...data, difficulty };
+    if (!response.text) {
+      throw new Error('Empty response from Gemini API');
+    }
+
+    const rawText = response.text.trim();
+    let data;
+    try {
+      data = JSON.parse(rawText);
+    } catch (parseError) {
+      console.error('Failed to parse JSON response:', rawText);
+      throw new Error(`Invalid JSON response from Gemini API: ${parseError instanceof Error ? parseError.message : String(parseError)}`);
+    }
+
+    // Validate required fields
+    if (!data.title || !data.surface || !data.bottom) {
+      throw new Error('Incomplete puzzle data received from Gemini API');
+    }
+
+    return { ...data, difficulty };
+  } catch (error) {
+    console.error('Failed to generate puzzle:', error);
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    if (errorMessage.includes('API_KEY')) {
+      throw new Error('Invalid or missing Gemini API key. Please check your .env.local file.');
+    }
+    if (errorMessage.includes('quota') || errorMessage.includes('rate limit')) {
+      throw new Error('Gemini API quota exceeded. Please try again later.');
+    }
+    if (errorMessage.includes('model')) {
+      throw new Error('Gemini model not available. Please check model configuration.');
+    }
+    throw new Error(`Failed to generate puzzle: ${errorMessage}`);
+  }
 };
 
 export const generateHint = async (puzzle: Puzzle, history: Interaction[], hintIndex: number): Promise<string> => {
-  const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-  const previousHints = history
-    .filter(h => h.type === 'hint')
-    .map(h => h.response)
-    .join(' | ');
+  try {
+    const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
+    const previousHints = history
+      .filter(h => h.type === 'hint')
+      .map(h => h.response)
+      .join(' | ');
 
-  const response = await ai.models.generateContent({
-    model: 'gemini-3-flash-preview',
-    contents: `[TRUTH]: ${puzzle.bottom}
+    const response = await ai.models.generateContent({
+      model: getModelForDifficulty(puzzle.difficulty),
+      contents: `[TRUTH]: ${puzzle.bottom}
 [PREVIOUS HINTS]: ${previousHints || "None"}
-[REQUEST]: Cryptic hint #${hintIndex}. 
+[REQUEST]: Cryptic hint #${hintIndex}.
 [RULE]: Guide the player's thinking without giving it away. Max 15 words.`,
-    config: {
-      responseMimeType: "application/json",
-      responseSchema: {
-        type: Type.OBJECT,
-        properties: {
-          hint: { type: Type.STRING }
-        },
-        required: ["hint"]
+      config: {
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            hint: { type: Type.STRING }
+          },
+          required: ["hint"]
+        }
       }
-    }
-  });
+    });
 
-  return JSON.parse(response.text.trim()).hint;
+    if (!response.text) {
+      throw new Error('Empty response from Gemini API');
+    }
+
+    const rawText = response.text.trim();
+    let data;
+    try {
+      data = JSON.parse(rawText);
+    } catch (parseError) {
+      console.error('Failed to parse JSON response:', rawText);
+      throw new Error(`Invalid JSON response from Gemini API: ${parseError instanceof Error ? parseError.message : String(parseError)}`);
+    }
+
+    if (!data.hint || typeof data.hint !== 'string') {
+      throw new Error('Invalid hint data received from Gemini API');
+    }
+
+    return data.hint;
+  } catch (error) {
+    console.error('Failed to generate hint:', error);
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    if (errorMessage.includes('API_KEY')) {
+      throw new Error('Invalid or missing Gemini API key. Please check your .env.local file.');
+    }
+    if (errorMessage.includes('quota') || errorMessage.includes('rate limit')) {
+      throw new Error('Gemini API quota exceeded. Please try again later.');
+    }
+    throw new Error(`Failed to generate hint: ${errorMessage}`);
+  }
 };
 
 export const evaluateInteraction = async (
   puzzle: Puzzle,
-  history: Interaction[],
+  _history: Interaction[],
   userInput: string,
   isGuess: boolean
 ): Promise<Interaction> => {
-  const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-  if (isGuess) {
-    const response = await ai.models.generateContent({
-      model: 'gemini-3-flash-preview',
-      contents: `[TRUTH]: ${puzzle.bottom}
+  try {
+    const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
+    if (isGuess) {
+      const response = await ai.models.generateContent({
+        model: getModelForDifficulty(puzzle.difficulty),
+        contents: `[TRUTH]: ${puzzle.bottom}
 [PLAYER GUESS]: ${userInput}
 
 [EVALUATION RULES]:
 1. Be SMART and LENIENT. If the player captures the core "twist" or "truth" of the mystery, it is CORRECT.
 2. Synonyms or simplified explanations are fine (e.g., if truth is "he is a stone carving statue" and player says "he is a statue", that is CORRECT).
 3. If incorrect, feedback must be exactly "The truth remains shrouded in mystery."`,
-      config: {
-        responseMimeType: "application/json",
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            isCorrect: { type: Type.BOOLEAN },
-            feedback: { type: Type.STRING }
-          },
-          required: ["isCorrect", "feedback"]
+        config: {
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              isCorrect: { type: Type.BOOLEAN },
+              feedback: { type: Type.STRING }
+            },
+            required: ["isCorrect", "feedback"]
+          }
         }
-      }
-    });
+      });
 
-    const result = JSON.parse(response.text.trim());
-    return {
-      type: 'guess',
-      content: userInput,
-      response: result.feedback,
-      status: result.isCorrect ? 'Correct' : 'Incorrect'
-    };
-  } else {
-    const response = await ai.models.generateContent({
-      model: 'gemini-3-flash-preview',
-      contents: `[TRUTH]: ${puzzle.bottom}\n[PLAYER QUESTION]: ${userInput}\nAnswer with: 'Yes', 'No', or 'Irrelevant'.`,
-      config: {
-        responseMimeType: "application/json",
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            status: { type: Type.STRING, enum: ['Yes', 'No', 'Irrelevant'] }
-          },
-          required: ["status"]
+      if (!response.text) {
+        throw new Error('Empty response from Gemini API');
+      }
+
+      const rawText = response.text.trim();
+      let result;
+      try {
+        result = JSON.parse(rawText);
+      } catch (parseError) {
+        console.error('Failed to parse JSON response:', rawText);
+        throw new Error(`Invalid JSON response from Gemini API: ${parseError instanceof Error ? parseError.message : String(parseError)}`);
+      }
+
+      if (typeof result.isCorrect !== 'boolean' || !result.feedback) {
+        throw new Error('Invalid evaluation data received from Gemini API');
+      }
+
+      return {
+        type: 'guess',
+        content: userInput,
+        response: result.feedback,
+        status: result.isCorrect ? 'Correct' : 'Incorrect'
+      };
+    } else {
+      const response = await ai.models.generateContent({
+        model: getModelForDifficulty(puzzle.difficulty),
+        contents: `[TRUTH]: ${puzzle.bottom}\n[PLAYER QUESTION]: ${userInput}\nAnswer with: 'Yes', 'No', or 'Irrelevant'.`,
+        config: {
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              status: { type: Type.STRING, enum: ['Yes', 'No', 'Irrelevant'] }
+            },
+            required: ["status"]
+          }
         }
-      }
-    });
+      });
 
-    const result = JSON.parse(response.text.trim());
-    return {
-      type: 'question',
-      content: userInput,
-      response: "",
-      status: result.status as QuestionStatus
-    };
+      if (!response.text) {
+        throw new Error('Empty response from Gemini API');
+      }
+
+      const rawText = response.text.trim();
+      let result;
+      try {
+        result = JSON.parse(rawText);
+      } catch (parseError) {
+        console.error('Failed to parse JSON response:', rawText);
+        throw new Error(`Invalid JSON response from Gemini API: ${parseError instanceof Error ? parseError.message : String(parseError)}`);
+      }
+
+      const validStatuses: QuestionStatus[] = ['Yes', 'No', 'Irrelevant'];
+      if (!result.status || !validStatuses.includes(result.status)) {
+        throw new Error('Invalid question evaluation data received from Gemini API');
+      }
+
+      return {
+        type: 'question',
+        content: userInput,
+        response: "",
+        status: result.status as QuestionStatus
+      };
+    }
+  } catch (error) {
+    console.error('Failed to evaluate interaction:', error);
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    if (errorMessage.includes('API_KEY')) {
+      throw new Error('Invalid or missing Gemini API key. Please check your .env.local file.');
+    }
+    if (errorMessage.includes('quota') || errorMessage.includes('rate limit')) {
+      throw new Error('Gemini API quota exceeded. Please try again later.');
+    }
+    throw new Error(`Failed to process your input: ${errorMessage}`);
   }
 };
