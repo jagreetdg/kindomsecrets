@@ -147,6 +147,10 @@ const sanitizeInput = (input: string): string => {
 };
 
 const App: React.FC = () => {
+  console.log('🎮 App component loaded');
+  console.log('🔧 Checking environment variables...');
+  console.log('API Key present:', import.meta.env['VITE_GEMINI_API_KEY'] ? 'YES' : 'NO');
+  console.log('API Key value:', import.meta.env['VITE_GEMINI_API_KEY']);
   const [gameState, setGameState] = useState<GameState>(GameState.MENU);
   const [currentPuzzle, setCurrentPuzzle] = useState<Puzzle | null>(null);
   const [history, setHistory] = useState<Interaction[]>([]);
@@ -467,8 +471,12 @@ const App: React.FC = () => {
   }, [gameState, currentPuzzle, history, input, hintsRemaining, hintIndex]);
 
   const startGame = async (difficulty: Difficulty) => {
+    console.log('🚀 startGame called with difficulty:', difficulty);
     playSfx('click');
-    if (isLoading || isProcessingRef.current) return;
+    if (isLoading || isProcessingRef.current) {
+      console.log('⚠️ Game already loading, skipping');
+      return;
+    }
     isProcessingRef.current = true;
     setLastAction({ type: 'start' });
     setIsLoading(true);
@@ -485,12 +493,20 @@ const App: React.FC = () => {
         bottom: entry.puzzle.bottom.substring(0, 100)   // First 100 chars of solution
       }));
       const exclusionStrings = exclusionData.flatMap(data => [data.title, data.surface, data.bottom]);
-      const puzzle = await generateNewPuzzle(difficulty, exclusionStrings);
-      setCurrentPuzzle(puzzle);
-      setGameState(GameState.PLAYING);
-      playSfx('wood');
+      console.log('🔍 Calling generateNewPuzzle with exclusion count:', exclusionStrings.length);
+      console.log('🔑 API key check:', import.meta.env['VITE_GEMINI_API_KEY'] ? 'Present' : 'Missing');
+      try {
+        const puzzle = await generateNewPuzzle(difficulty, exclusionStrings);
+        console.log('✅ Puzzle generated:', { title: puzzle.title, difficulty: puzzle.difficulty });
+        setCurrentPuzzle(puzzle);
+        setGameState(GameState.PLAYING);
+        playSfx('wood');
+      } catch (generateError) {
+        console.error('❌ generateNewPuzzle threw error:', generateError);
+        throw generateError; // Re-throw so it gets caught by outer catch
+      }
     } catch (error) {
-      console.error('Failed to generate puzzle:', error);
+      console.error('❌ Failed to generate puzzle:', error);
       setError('Failed to generate puzzle. Please try again.');
       setGameState(GameState.MENU);
     } finally {

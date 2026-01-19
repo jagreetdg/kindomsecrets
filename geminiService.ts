@@ -1,51 +1,17 @@
+/// <reference types="vite/client" />
 
-import { GoogleGenAI, Type } from "@google/genai";
+import { GoogleGenerativeAI, SchemaType } from "@google/generative-ai";
 import { Puzzle, Interaction, Difficulty } from "./types";
 
 type QuestionStatus = 'Yes' | 'No' | 'Irrelevant';
 
-// Safe JSON parsing with error recovery
-const safeJsonParse = (text: string): any => {
-  try {
-    return JSON.parse(text);
-  } catch (error) {
-    console.error('Initial JSON parse failed:', error);
-    console.error('Raw response text:', text);
-
-    // Try to clean up common JSON issues
-    let cleanedText = text.trim();
-
-    // Remove any leading/trailing non-JSON content
-    const jsonStart = cleanedText.indexOf('{');
-    const jsonEnd = cleanedText.lastIndexOf('}');
-
-    if (jsonStart !== -1 && jsonEnd !== -1 && jsonEnd > jsonStart) {
-      cleanedText = cleanedText.substring(jsonStart, jsonEnd + 1);
-    }
-
-    // Fix common issues
-    cleanedText = cleanedText
-      .replace(/,\s*}/g, '}') // Remove trailing commas
-      .replace(/,\s*]/g, ']') // Remove trailing commas in arrays
-      .replace(/([{,]\s*)([a-zA-Z_][a-zA-Z0-9_]*)\s*:/g, '$1"$2":') // Quote unquoted keys
-      .replace(/:\s*([^",\[\]{}\n]+)([,}])/g, ': "$1"$2'); // Quote unquoted string values
-
-    try {
-      return JSON.parse(cleanedText);
-    } catch (secondError) {
-      console.error('Cleaned JSON parse also failed:', secondError);
-      console.error('Cleaned text:', cleanedText);
-      throw new Error(`JSON parsing failed after cleanup: ${secondError instanceof Error ? secondError.message : String(secondError)}`);
-    }
-  }
-};
-
 // Model selection with fallback logic
 const getModelForDifficulty = (difficulty: Difficulty, attemptCount: number = 0): string => {
   const models = {
-    Easy: ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-pro'], // Start with fast/simple model
-    Medium: ['gemini-1.5-pro', 'gemini-pro', 'gemini-1.5-flash'], // Start with more capable model
-    Hard: ['gemini-pro', 'gemini-1.5-pro', 'gemini-1.5-flash'] // Start with most capable model
+    // We use -latest or 2.0 to ensure v1beta compatibility
+    Easy: ['gemini-1.5-flash-latest', 'gemini-2.0-flash'],
+    Medium: ['gemini-2.0-flash', 'gemini-1.5-pro-latest'],
+    Hard: ['gemini-1.5-pro-latest', 'gemini-2.0-flash']
   };
 
   const difficultyModels = models[difficulty] || models.Easy;
@@ -55,9 +21,10 @@ const getModelForDifficulty = (difficulty: Difficulty, attemptCount: number = 0)
 };
 
 // Validate API key at module level
-const GEMINI_API_KEY = process.env['GEMINI_API_KEY'];
+const GEMINI_API_KEY = import.meta.env['VITE_GEMINI_API_KEY'];
+console.log('🔑 API Key loaded:', GEMINI_API_KEY ? 'Present' : 'Missing');
 if (!GEMINI_API_KEY) {
-  throw new Error('GEMINI_API_KEY environment variable is required but not set. Please create a .env.local file with your Gemini API key.');
+  throw new Error('VITE_GEMINI_API_KEY environment variable is required but not set. Please create a .env.local file with your Gemini API key.');
 }
 
 const CLASSIC_LOGIC_SEEDS = `
@@ -91,139 +58,104 @@ ${CLASSIC_LOGIC_SEEDS}
 [Strict Rule]: Use your vast knowledge of riddles to provide unique and logical scenarios. NEVER repeat the same core logic twice in a row.
 
 [Language]: All output must be in English.`;
+
 export const generateNewPuzzle = async (difficulty: Difficulty, playedTitles: string[] = [], attemptCount: number = 0): Promise<Puzzle> => {
-  const maxRetries = 3;
+  const modelName = getModelForDifficulty(difficulty, attemptCount);
 
   try {
-    const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
-    const model = getModelForDifficulty(difficulty, attemptCount);
+    const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
 
-    const response = await ai.models.generateContent({
-      model,
-      contents: `Generate a ${difficulty} difficulty medieval lateral thinking puzzle.
-      ${difficulty === 'Easy' ? 'Use very simple, classic logic like "it was a dog" or "he jumped from a low height".' : ''}
-      Avoid puzzles similar to these previously played ones: ${playedTitles.join(', ')}.
-      This includes similar scenarios, riddles, or solutions that users have already encountered.`,
-      config: {
-        systemInstruction: SYSTEM_PROMPT,
+    // Force v1beta to get responseSchema support
+    const model = genAI.getGenerativeModel({
+      model: modelName,
+      systemInstruction: SYSTEM_PROMPT,
+    }, { apiVersion: 'v1beta' });
+
+    console.log(`📡 Calling ${modelName} on v1beta...`);
+
+    const result = await model.generateContent({
+      contents: [{
+        role: 'user',
+        parts: [{ text: `Generate a ${difficulty} medieval puzzle. Avoid: ${playedTitles.join(', ')}` }]
+      }],
+      generationConfig: {
         responseMimeType: "application/json",
         responseSchema: {
-          type: Type.OBJECT,
+          type: SchemaType.OBJECT,
           properties: {
-            title: { type: Type.STRING },
-            surface: { type: Type.STRING },
-            bottom: { type: Type.STRING }
+            title: { type: SchemaType.STRING },
+            surface: { type: SchemaType.STRING },
+            bottom: { type: SchemaType.STRING }
           },
           required: ["title", "surface", "bottom"]
         }
       }
     });
 
-    if (!response.text) {
-      throw new Error('Empty response from Gemini API');
-    }
-
-    const rawText = response.text.trim();
-    let data;
-    try {
-      data = safeJsonParse(rawText);
-    } catch (parseError) {
-      throw new Error(`Invalid JSON response from Gemini API: ${parseError instanceof Error ? parseError.message : String(parseError)}`);
-    }
-
-    // Validate required fields
-    if (!data.title || !data.surface || !data.bottom) {
-      throw new Error('Incomplete puzzle data received from Gemini API');
-    }
-
-    return { ...data, difficulty };
-  } catch (error) {
-    console.error(`Failed to generate puzzle (attempt ${attemptCount + 1}):`, error);
-    const errorMessage = error instanceof Error ? error.message : String(error);
-
-    // If this is a model-related error and we haven't exhausted retries, try with a different model
-    if ((errorMessage.includes('model') || errorMessage.includes('MODEL')) && attemptCount < maxRetries - 1) {
-      console.log(`Retrying with alternative model (attempt ${attemptCount + 2})`);
+    return JSON.parse(result.response.text());
+  } catch (error: any) {
+    // If we get a 404, it means the model name was wrong for this endpoint
+    if (error.message?.includes('404') && attemptCount < 2) {
+      console.warn(`⚠️ Model ${modelName} not found. Retrying with next model...`);
       return generateNewPuzzle(difficulty, playedTitles, attemptCount + 1);
     }
-
-    // Handle other specific errors
-    if (errorMessage.includes('API_KEY')) {
-      throw new Error('Invalid or missing Gemini API key. Please check your .env.local file.');
-    }
-    if (errorMessage.includes('quota') || errorMessage.includes('rate limit')) {
-      throw new Error('Gemini API quota exceeded. Please try again later.');
-    }
-    if (errorMessage.includes('model')) {
-      throw new Error('Gemini model not available. Please check model configuration.');
-    }
-    throw new Error(`Failed to generate puzzle: ${errorMessage}`);
+    throw error;
   }
 };
 
 export const generateHint = async (puzzle: Puzzle, history: Interaction[], hintIndex: number, attemptCount: number = 0): Promise<string> => {
-  const maxRetries = 3;
-
   try {
-    const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
-    const model = getModelForDifficulty(puzzle.difficulty, attemptCount);
+    const modelName = getModelForDifficulty(puzzle.difficulty, attemptCount);
+    const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
+
+    const model = genAI.getGenerativeModel({
+      model: modelName,
+    }, { apiVersion: 'v1beta' });
 
     const previousHints = history
       .filter(h => h.type === 'hint')
       .map(h => h.response)
       .join(' | ');
 
-    const response = await ai.models.generateContent({
-      model,
-      contents: `[TRUTH]: ${puzzle.bottom}
+    console.log(`📡 Requesting hint from ${modelName} via v1beta...`);
+
+    const result = await model.generateContent({
+      contents: [{
+        role: 'user',
+        parts: [{
+          text: `[TRUTH]: ${puzzle.bottom}
 [PREVIOUS HINTS]: ${previousHints || "None"}
 [REQUEST]: Cryptic hint #${hintIndex}.
-[RULE]: Guide the player's thinking without giving it away. Max 15 words.`,
-      config: {
+[RULE]: Guide the player's thinking without giving it away. Max 15 words.`
+        }]
+      }],
+      generationConfig: {
         responseMimeType: "application/json",
         responseSchema: {
-          type: Type.OBJECT,
+          type: SchemaType.OBJECT,
           properties: {
-            hint: { type: Type.STRING }
+            hint: { type: SchemaType.STRING }
           },
           required: ["hint"]
         }
       }
     });
 
-    if (!response.text) {
-      throw new Error('Empty response from Gemini API');
-    }
-
-    const rawText = response.text.trim();
-    let data;
-    try {
-      data = safeJsonParse(rawText);
-    } catch (parseError) {
-      throw new Error(`Invalid JSON response from Gemini API: ${parseError instanceof Error ? parseError.message : String(parseError)}`);
-    }
+    const response = result.response;
+    const data = JSON.parse(response.text());
 
     if (!data.hint || typeof data.hint !== 'string') {
       throw new Error('Invalid hint data received from Gemini API');
     }
 
     return data.hint;
-  } catch (error) {
-    console.error(`Failed to generate hint (attempt ${attemptCount + 1}):`, error);
+
+  } catch (error: unknown) {
     const errorMessage = error instanceof Error ? error.message : String(error);
+    console.error(`❌ Failed to generate hint (attempt ${attemptCount + 1}):`, errorMessage);
 
-    // If this is a model-related error and we haven't exhausted retries, try with a different model
-    if ((errorMessage.includes('model') || errorMessage.includes('MODEL')) && attemptCount < maxRetries - 1) {
-      console.log(`Retrying hint generation with alternative model (attempt ${attemptCount + 2})`);
+    if (attemptCount < 2) {
       return generateHint(puzzle, history, hintIndex, attemptCount + 1);
-    }
-
-    // Handle other specific errors
-    if (errorMessage.includes('API_KEY')) {
-      throw new Error('Invalid or missing Gemini API key. Please check your .env.local file.');
-    }
-    if (errorMessage.includes('quota') || errorMessage.includes('rate limit')) {
-      throw new Error('Gemini API quota exceeded. Please try again later.');
     }
     throw new Error(`Failed to generate hint: ${errorMessage}`);
   }
@@ -236,16 +168,22 @@ export const evaluateInteraction = async (
   isGuess: boolean,
   attemptCount: number = 0
 ): Promise<Interaction> => {
-  const maxRetries = 3;
-
   try {
-    const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
-    const model = getModelForDifficulty(puzzle.difficulty, attemptCount);
+    const modelName = getModelForDifficulty(puzzle.difficulty, attemptCount);
+    const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
+
+    const model = genAI.getGenerativeModel({
+      model: modelName,
+    }, { apiVersion: 'v1beta' });
+
+    console.log(`📡 Evaluating interaction with ${modelName} via v1beta...`);
 
     if (isGuess) {
-      const response = await ai.models.generateContent({
-        model,
-        contents: `[TRUTH]: ${puzzle.bottom}
+      const result = await model.generateContent({
+        contents: [{
+          role: 'user',
+          parts: [{
+            text: `[TRUTH]: ${puzzle.bottom}
 [PLAYER GUESS]: ${userInput}
 
 [EVALUATION RULES]:
@@ -264,72 +202,64 @@ export const evaluateInteraction = async (
    - Truth: "He is a statue" → Guess: "He can't move" ✗ (misses the material/creation aspect)
    - Truth: "She is pregnant" → Guess: "Something happened to her" ✗ (too generic)
 7. Only mark CORRECT if the guess shows clear understanding of the puzzle's specific mechanism or twist.
-8. If incorrect, feedback must be exactly "The truth remains shrouded in mystery."`,
-        config: {
+8. If incorrect, feedback must be exactly "The truth remains shrouded in mystery."`
+          }]
+        }],
+        generationConfig: {
           responseMimeType: "application/json",
           responseSchema: {
-            type: Type.OBJECT,
+            type: SchemaType.OBJECT,
             properties: {
-              isCorrect: { type: Type.BOOLEAN },
-              feedback: { type: Type.STRING }
+              isCorrect: { type: SchemaType.BOOLEAN },
+              feedback: { type: SchemaType.STRING }
             },
             required: ["isCorrect", "feedback"]
           }
         }
       });
 
-      if (!response.text) {
-        throw new Error('Empty response from Gemini API');
-      }
+      const response = result.response;
+      const data = JSON.parse(response.text());
 
-      const rawText = response.text.trim();
-      let result;
-      try {
-        result = safeJsonParse(rawText);
-      } catch (parseError) {
-        throw new Error(`Invalid JSON response from Gemini API: ${parseError instanceof Error ? parseError.message : String(parseError)}`);
-      }
-
-      if (typeof result.isCorrect !== 'boolean' || !result.feedback) {
+      if (typeof data.isCorrect !== 'boolean' || !data.feedback) {
         throw new Error('Invalid evaluation data received from Gemini API');
       }
 
       return {
         type: 'guess',
         content: userInput,
-        response: result.feedback,
-        status: result.isCorrect ? 'Correct' : 'Incorrect'
+        response: data.feedback,
+        status: data.isCorrect ? 'Correct' : 'Incorrect'
       };
+
     } else {
-      const response = await ai.models.generateContent({
-        model,
-        contents: `[TRUTH]: ${puzzle.bottom}\n[PLAYER QUESTION]: ${userInput}\nAnswer with: 'Yes', 'No', or 'Irrelevant'.`,
-        config: {
+      // Question evaluation
+      const result = await model.generateContent({
+        contents: [{
+          role: 'user',
+          parts: [{
+            text: `[TRUTH]: ${puzzle.bottom}
+[PLAYER QUESTION]: ${userInput}
+Answer with: 'Yes', 'No', or 'Irrelevant'.`
+          }]
+        }],
+        generationConfig: {
           responseMimeType: "application/json",
           responseSchema: {
-            type: Type.OBJECT,
+            type: SchemaType.OBJECT,
             properties: {
-              status: { type: Type.STRING, enum: ['Yes', 'No', 'Irrelevant'] }
+              status: { type: SchemaType.STRING }
             },
             required: ["status"]
           }
         }
       });
 
-      if (!response.text) {
-        throw new Error('Empty response from Gemini API');
-      }
-
-      const rawText = response.text.trim();
-      let result;
-      try {
-        result = safeJsonParse(rawText);
-      } catch (parseError) {
-        throw new Error(`Invalid JSON response from Gemini API: ${parseError instanceof Error ? parseError.message : String(parseError)}`);
-      }
+      const response = result.response;
+      const data = JSON.parse(response.text());
 
       const validStatuses: QuestionStatus[] = ['Yes', 'No', 'Irrelevant'];
-      if (!result.status || !validStatuses.includes(result.status)) {
+      if (!data.status || !validStatuses.includes(data.status)) {
         throw new Error('Invalid question evaluation data received from Gemini API');
       }
 
@@ -337,25 +267,16 @@ export const evaluateInteraction = async (
         type: 'question',
         content: userInput,
         response: "",
-        status: result.status as QuestionStatus
+        status: data.status as QuestionStatus
       };
     }
-  } catch (error) {
-    console.error(`Failed to evaluate interaction (attempt ${attemptCount + 1}):`, error);
+
+  } catch (error: unknown) {
     const errorMessage = error instanceof Error ? error.message : String(error);
+    console.error(`❌ Failed to evaluate interaction (attempt ${attemptCount + 1}):`, errorMessage);
 
-    // If this is a model-related error and we haven't exhausted retries, try with a different model
-    if ((errorMessage.includes('model') || errorMessage.includes('MODEL')) && attemptCount < maxRetries - 1) {
-      console.log(`Retrying interaction evaluation with alternative model (attempt ${attemptCount + 2})`);
+    if (attemptCount < 2) {
       return evaluateInteraction(puzzle, _history, userInput, isGuess, attemptCount + 1);
-    }
-
-    // Handle other specific errors
-    if (errorMessage.includes('API_KEY')) {
-      throw new Error('Invalid or missing Gemini API key. Please check your .env.local file.');
-    }
-    if (errorMessage.includes('quota') || errorMessage.includes('rate limit')) {
-      throw new Error('Gemini API quota exceeded. Please try again later.');
     }
     throw new Error(`Failed to process your input: ${errorMessage}`);
   }
