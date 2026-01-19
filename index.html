@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Kingdom Secrets - Lateral Thinking Riddle</title>
+    <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&family=VT323&display=swap" rel="stylesheet">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        :root {
+            --stone: #4a4138;
+            --iron: #1e1e1e;
+            --blood: #7b0000;
+            --gold: #c5a059;
+            --parchment: #f2e3bc;
+            --menu-bg: rgba(109, 90, 68, 0.35); 
+            --investigation-bg: rgba(45, 45, 45, 0.88);
+        }
+
+        body {
+            font-family: 'VT323', monospace;
+            background-color: #0d0d0d;
+            background-image: url('https://cdn.nanobananapro.io/nano-banana/e44357c2-fcd8-45f3-bdd5-90614dbefdc9.png');
+            background-size: cover;
+            background-position: center;
+            background-attachment: fixed;
+            background-repeat: no-repeat;
+            image-rendering: pixelated;
+            color: #dcdcdc;
+            overflow-x: hidden;
+            margin: 0;
+            padding: 0;
+        }
+
+        /* Reduced overlay opacity and added subtle vignette for atmospheric depth without "smog" */
+        body::before {
+            content: "";
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: radial-gradient(circle, rgba(0,0,0,0.15) 0%, rgba(0,0,0,0.45) 100%);
+            z-index: -1;
+            pointer-events: none;
+        }
+
+        .font-pixel-title {
+            font-family: 'Press Start 2P', cursive;
+        }
+
+        .pixel-reading {
+            font-family: 'VT323', monospace !important;
+            letter-spacing: 0.5px;
+        }
+
+        .stone-border {
+            border: 6px solid var(--stone);
+            background: var(--investigation-bg);
+            box-shadow: 
+                inset 4px 4px 0px #5e5246,
+                inset -4px -4px 0px #1a1510,
+                0px 10px 30px rgba(0,0,0,0.8);
+            backdrop-filter: blur(4px);
+        }
+
+        .menu-panel {
+            border: 6px solid rgba(197, 160, 89, 0.3);
+            background: var(--menu-bg);
+            box-shadow: 0px 0px 40px rgba(0,0,0,0.6);
+            backdrop-filter: blur(6px);
+        }
+
+        .parchment {
+            background-color: rgba(242, 227, 188, 0.95);
+            color: #433422;
+            border: 4px solid #bdae82;
+            position: relative;
+            box-shadow: 5px 5px 15px rgba(0,0,0,0.6);
+            background-image: url('https://www.transparenttextures.com/patterns/paper-fibers.png');
+        }
+
+        .medieval-button {
+            position: relative;
+            display: inline-block;
+            padding: 10px;
+            background-color: rgba(44, 34, 23, 0.9);
+            color: var(--gold);
+            text-transform: uppercase;
+            border: 4px solid #5a4b3b;
+            cursor: pointer;
+            transition: all 0.1s;
+            font-size: 8px;
+            box-shadow: 4px 4px 0px #000;
+            font-family: 'Press Start 2P', cursive;
+        }
+
+        .medieval-button:active:not(:disabled) {
+            transform: translate(2px, 2px);
+            box-shadow: 2px 2px 0px #000;
+        }
+
+        .medieval-button:hover:not(:disabled) {
+            background-color: #3e3328;
+            color: #f1d592;
+            border-color: var(--gold);
+        }
+
+        .medieval-button:disabled {
+            opacity: 0.4;
+            cursor: not-allowed;
+        }
+
+        .danger-button {
+            background-color: var(--blood);
+            color: #fff;
+            border-color: #4a0000;
+        }
+
+        @keyframes pageFadeIn {
+            from { opacity: 0; transform: translateY(8px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .animate-page-entry {
+            animation: pageFadeIn 0.3s ease-out forwards;
+        }
+
+        ::-webkit-scrollbar { width: 10px; }
+        ::-webkit-scrollbar-track { background: rgba(0,0,0,0.2); }
+        ::-webkit-scrollbar-thumb { background: #5a4b3b; border: 2px solid transparent; background-clip: content-box; border-radius: 4px; }
+
+        textarea::placeholder { font-family: 'VT323', monospace; font-size: 1.5rem; color: #555; }
+        
+        /* Global override for any standard font weights or properties that might trigger sans-serif */
+        * {
+            -webkit-font-smoothing: none;
+            -moz-osx-font-smoothing: grayscale;
+        }
+    </style>
+<script type="importmap">
+{
+  "imports": {
+    "react/": "https://esm.sh/react@^19.2.3/",
+    "react": "https://esm.sh/react@^19.2.3",
+    "react-dom/": "https://esm.sh/react-dom@^19.2.3/",
+    "@google/genai": "https://esm.sh/@google/genai@^1.37.0"
+  }
+}
+</script>
+<link rel="stylesheet" href="/index.css">
+</head>
+<body>
+    <div id="root"></div>
+<script type="module" src="/index.tsx"></script>
+</body>
+</html>
